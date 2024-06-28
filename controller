@@ -1,0 +1,593 @@
+   // Validate and add info in database > add monthly payment
+	public function add_pay_to_all()
+	{
+
+		/* Define return | here result is used to return user data and error for error message */
+		$Return = array('result' => '', 'error' => '', 'csrf_hash' => '');
+		$Return['csrf_hash'] = $this->security->get_csrf_hash();
+
+		if ($this->input->post('add_type') == 'payroll') {
+			if ($this->input->post('company_id') == 0 && $this->input->post('location_id') == 0 && $this->input->post('department_id') == 0) {
+				$eresult = $this->Payroll_model->get_all_employees();
+				$result = $eresult->result();
+			} else if ($this->input->post('company_id') != 0 && $this->input->post('location_id') == 0 && $this->input->post('department_id') == 0) {
+				$eresult = $this->Payroll_model->get_company_payroll_employees($this->input->post('company_id'));
+				$result = $eresult->result();
+			} else if ($this->input->post('company_id') != 0 && $this->input->post('location_id') != 0 && $this->input->post('department_id') == 0) {
+				$eresult = $this->Payroll_model->get_company_location_payroll_employees($this->input->post('company_id'), $this->input->post('location_id'));
+				$result = $eresult->result();
+			} else if ($this->input->post('company_id') != 0 && $this->input->post('location_id') != 0 && $this->input->post('department_id') != 0) {
+				$eresult = $this->Payroll_model->get_company_location_dep_payroll_employees($this->input->post('company_id'), $this->input->post('location_id'), $this->input->post('department_id'));
+				$result = $eresult->result();
+			} else {
+				$Return['error'] = $this->lang->line('xin_record_not_found');
+			}
+			$system = $this->Xin_model->read_setting_info(1);
+			$system_settings = system_settings_info(1);
+			if ($system_settings->online_payment_account == '') {
+				$online_payment_account = 0;
+			} else {
+				$online_payment_account = $system_settings->online_payment_account;
+			}
+			foreach ($result as $empid) {
+				$user_id = $empid->user_id;
+				$user = $this->Xin_model->read_user_info($user_id);
+				$total_overtime = 0;
+				$total_overtime_hours = 0;
+				$deduction_half_day = 0;
+				$tleave_half = 0;
+				$hrs_old_int1_late = 0;
+				$totalpotongan = 0;
+				/* Server side PHP input validation */
+				if ($empid->wages_type == 1) {
+					$basic_salary = $empid->basic_salary;
+					$salary_type = 'full_monthly';
+					$hours_worked = '';
+				} elseif ($empid->wages_type == 2) {
+					$result = $this->Payroll_model->total_hours_worked($user_id, $this->input->post('month_year'));
+					$hrs_old_int1 = 0;
+					$pcount = 0;
+					$Trest = 0;
+					$total_time_rs = 0;
+					$hrs_old_int_res1 = 0;
+					foreach ($result->result() as $hour_work) {
+						// total work			
+						$clock_in =  new DateTime($hour_work->clock_in);
+						$clock_out =  new DateTime($hour_work->clock_out);
+						$interval_late = $clock_in->diff($clock_out);
+						$hours_r  = $interval_late->format('%h');
+						$minutes_r = $interval_late->format('%i');
+						$total_time = $hours_r . ":" . $minutes_r . ":" . '00';
+
+						$str_time = $total_time;
+
+						$str_time = preg_replace("/^([\d]{1,2})\:([\d]{2})$/", "00:$1:$2", $str_time);
+
+						sscanf($str_time, "%d:%d:%d", $hours, $minutes, $seconds);
+
+						$hrs_old_seconds = $hours * 3600 + $minutes * 60 + $seconds;
+
+						$hrs_old_int1 += $hrs_old_seconds;
+
+						$pcount = gmdate("H", $hrs_old_int1);
+					}
+					$pcount = $pcount;
+					$basic_salary = $pcount * $empid->basic_salary;
+					$salary_type = 'hourly';
+					$hours_worked = $pcount;
+				} elseif ($empid->wages_type == 3) {
+					//   start if daily 
+					$overtime_count = $this->Overtime_request_model->get_overtime_request_count($user_id, $this->input->post('month_year'));
+					$re_hrs_old_int1 = 0;
+					$re_hrs_old_seconds = 0;
+					$re_pcount = 0;
+					foreach ($overtime_count as $overtime_hr) {
+						// total work			
+						$request_clock_in =  new DateTime($overtime_hr->request_clock_in);
+						$request_clock_out =  new DateTime($overtime_hr->request_clock_out);
+						$re_interval_late = $request_clock_in->diff($request_clock_out);
+						$re_hours_r  = $re_interval_late->format('%h');
+						$re_minutes_r = $re_interval_late->format('%i');
+						$re_total_time = $re_hours_r . ":" . $re_minutes_r . ":" . '00';
+
+						$re_str_time = $re_total_time;
+
+						$re_str_time = preg_replace("/^([\d]{1,2})\:([\d]{2})$/", "00:$1:$2", $re_str_time);
+
+						sscanf($re_str_time, "%d:%d:%d", $hours, $minutes, $seconds);
+
+						$re_hrs_old_seconds = $hours * 3600 + $minutes * 60 + $seconds;
+
+						$re_hrs_old_int1 += $re_hrs_old_seconds;
+
+						$re_pcount = gmdate("H", $re_hrs_old_int1);
+					}
+
+					$hrs_old_int1_overtime = 0;
+					$pcount_overtime = '0';
+					$overtime_countWorked = $this->Overtime_request_model->total_overtime_worked($user_id, $this->input->post('month_year'));
+					if ($overtime_countWorked->num_rows() > 0) {
+						foreach ($overtime_countWorked->result() as $result_overtime) {
+
+							$get_day = strtotime($result_overtime->clock_out);
+							$day = date('l', $get_day);
+							// office shift
+							$office_shift = $this->Timesheet_model->read_office_shift_information($empid->office_shift_id);
+							if (!is_null($office_shift)) {
+								// get clock in/clock out of each employee
+								if ($day == 'Monday') {
+									if ($office_shift[0]->monday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->monday_in_time;
+										$out_time = $office_shift[0]->monday_out_time;
+									}
+								} else if ($day == 'Tuesday') {
+									if ($office_shift[0]->tuesday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->tuesday_in_time;
+										$out_time = $office_shift[0]->tuesday_out_time;
+									}
+								} else if ($day == 'Wednesday') {
+									if ($office_shift[0]->wednesday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->wednesday_in_time;
+										$out_time = $office_shift[0]->wednesday_out_time;
+									}
+								} else if ($day == 'Thursday') {
+									if ($office_shift[0]->thursday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->thursday_in_time;
+										$out_time = $office_shift[0]->thursday_out_time;
+									}
+								} else if ($day == 'Friday') {
+									if ($office_shift[0]->friday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->friday_in_time;
+										$out_time = $office_shift[0]->friday_out_time;
+									}
+								} else if ($day == 'Saturday') {
+									if ($office_shift[0]->saturday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->saturday_in_time;
+										$out_time = $office_shift[0]->saturday_out_time;
+									}
+								} else if ($day == 'Sunday') {
+									if ($office_shift[0]->sunday_in_time == '') {
+										$in_time = '00:00:00';
+										$out_time = '00:00:00';
+									} else {
+										$in_time = $office_shift[0]->sunday_in_time;
+										$out_time = $office_shift[0]->sunday_out_time;
+									}
+								}
+							}
+							// Contoh data lembur
+							$clock_out_overtime = new DateTime($result_overtime->clock_out);  // Waktu keluar
+							$clock_in_overtime = new DateTime($clock_out_overtime->format('Y-m-d') . $out_time);   // Waktu masuk
+
+							// Menghitung selisih waktu lembur hanya jika clock_out_overtime lebih lambat dari clock_in_overtime
+							if ($clock_out_overtime > $clock_in_overtime) {
+								$interval_overtime = $clock_out_overtime->diff($clock_in_overtime);
+								$hours_r_overtime = $interval_overtime->format('%h');
+								$minutes_r_overtime = $interval_overtime->format('%i');
+
+								// Mengonversi selisih waktu ke format detik
+								$total_time_overtime = $hours_r_overtime . ":" . $minutes_r_overtime . ":00";
+								$str_time_overtime = preg_replace("/^([\d]{1,2})\:([\d]{2})$/", "00:$1:$2", $total_time_overtime);
+
+								sscanf($str_time_overtime, "%d:%d:%d", $hours_overtime, $minutes_overtime, $seconds_overtime);
+								$hrs_old_seconds_overtime = $hours_overtime * 3600 + $minutes_overtime * 60 + $seconds_overtime;
+
+								// Hanya tambahkan jika lebih dari atau sama dengan 3600 detik (1 jam)
+								if ($hrs_old_seconds_overtime >= 3600) {
+									$hrs_old_int1_overtime += floor($hrs_old_seconds_overtime / 3600);
+								}
+
+								// Mengonversi total detik lembur ke format jam:menit:detik
+								$pcount_overtime = $hrs_old_int1_overtime;  // Pembulatan ke bawah ke jam
+							}
+						}
+					} else {
+						$pcount_overtime = '0';
+					}
+
+					// count daily worked 
+					$daily = $this->Payroll_model->total_daily_worked($user_id, $this->input->post('month_year'));
+					foreach ($daily->result() as $daily_work) {
+						$tdaily = $daily_work->total_hari;
+					}
+					$leave_half_day = $this->Payroll_model->total_leave_day($user_id, $this->input->post('month_year'));
+					foreach ($leave_half_day->result() as $leave_half) {
+						$tleave_half = $leave_half->total_leave;
+					}
+					// $awal = date('Y-m-d', strtotime($this->input->post('month_year') . '-01'));
+					// $awal = date('Y-m-d', strtotime($awal . '-1 month +20 days'));
+
+					// // Mengatur tanggal akhir menjadi tanggal 20 dari bulan yang sama
+					// $akhir = date('Y-m-d', strtotime($this->input->post('month_year') . '-01'));
+					// $akhir = date('Y-m-d', strtotime($akhir . '+19 days'));
+
+					// // Menghitung jumlah hari antara $awal dan $akhir
+					// $date_awal = new DateTime($awal);
+					// $date_akhir = new DateTime($akhir);
+					// $interval = $date_awal->diff($date_akhir);
+					// $jumlah_hari = $interval->days;
+
+					// Konversi ke tanggal pertama bulan yang diminta
+					$first_day_of_requested_month = date('Y-m-01', strtotime($this->input->post('month_year')));
+
+					// Kurangi satu bulan dari tanggal pertama bulan yang diminta
+					$previous_month = date('Y-m-01', strtotime('-1 month', strtotime($first_day_of_requested_month)));
+
+					// Hitung jumlah hari dalam bulan sebelumnya
+					$jumlah_hari = date('t', strtotime($previous_month));
+
+					// Mengurangi jumlah hari dengan jatah libur
+					$jumlah_hari_dikurangi = $jumlah_hari - $empid->holidays_total;
+					$hitung_salary  = $empid->basic_salary / $jumlah_hari_dikurangi;
+					$deduction_half_day = ROUND($tleave_half * (0.5 * $hitung_salary));
+
+					$basic_salary = $hitung_salary;
+					$salary_type = 'daily';
+					$hours_worked = $tdaily;
+					$total_overtime = $empid->salary_overtime;
+					$total_overtime_hours = $pcount_overtime;
+
+					// end if daily
+				} else {
+					$basic_salary = $empid->daily_wages;
+				}
+				$pay_count = $this->Payroll_model->read_make_payment_payslip_check($user_id, $this->input->post('month_year'));
+				if ($pay_count->num_rows() > 0) {
+					$pay_val = $this->Payroll_model->read_make_payment_payslip($user_id, $this->input->post('month_year'));
+					$this->payslip_delete_all($pay_val[0]->payslip_id);
+				}
+				if ($basic_salary > 0) {
+
+					// get designation
+					$designation = $this->Designation_model->read_designation_information($user[0]->designation_id);
+					if (!is_null($designation)) {
+						$designation_id = $designation[0]->designation_id;
+					} else {
+						$designation_id = 1;
+					}
+					// department
+					$department = $this->Department_model->read_department_information($user[0]->department_id);
+					if (!is_null($department)) {
+						$department_id = $department[0]->department_id;
+					} else {
+						$department_id = 1;
+					}
+
+					$salary_allowances = $this->Employees_model->read_salary_allowances($user_id);
+					$count_allowances = $this->Employees_model->count_employee_allowances($user_id);
+					$allowance_amount = 0;
+					if ($count_allowances > 0) {
+						foreach ($salary_allowances as $sl_allowances) {
+							$allowance_amount += $sl_allowances->allowance_amount;
+						}
+					} else {
+						$allowance_amount = 0;
+					}
+					// 3: all loan/deductions
+					$salary_loan_deduction = $this->Employees_model->read_salary_loan_deductions($user_id);
+					$count_loan_deduction = $this->Employees_model->count_employee_deductions($user_id);
+					$loan_de_amount = 0;
+					if ($count_loan_deduction > 0) {
+						foreach ($salary_loan_deduction as $sl_salary_loan_deduction) {
+							$loan_de_amount += $sl_salary_loan_deduction->loan_deduction_amount;
+						}
+					} else {
+						$loan_de_amount = 0;
+					}
+					
+					// 5: overtime
+					$salary_overtime = $this->Employees_model->read_salary_overtime($user_id);
+					$count_overtime = $this->Employees_model->count_employee_overtime($user_id);
+					$overtime_amount = 0;
+					if ($count_overtime > 0) {
+						foreach ($salary_overtime as $sl_overtime) {
+							$overtime_total = $sl_overtime->overtime_hours * $sl_overtime->overtime_rate;
+							$overtime_amount += $overtime_total;
+						}
+					} else {
+						$overtime_amount = 0;
+					}
+                    
+                    $late_countWorked = $this->Payroll_model->total_late_worked($user_id, $this->input->post('month_year'));
+						if ($late_countWorked->num_rows() > 0) {
+							foreach ($late_countWorked->result() as $result_late) {
+								$get_day = strtotime($result_late->clock_in);
+								$day = date('l', $get_day);
+
+								// office shift
+															$office_shift = $this->Timesheet_model->read_office_shift_information($empid->office_shift_id);
+								$in_time = '00:00:00'; // Default in_time
+
+								if (!is_null($office_shift)) {
+									switch ($day) {
+										case 'Monday':
+											$in_time = $office_shift[0]->monday_in_time ?? $in_time;
+											break;
+										case 'Tuesday':
+											$in_time = $office_shift[0]->tuesday_in_time ?? $in_time;
+											break;
+										case 'Wednesday':
+											$in_time = $office_shift[0]->wednesday_in_time ?? $in_time;
+											break;
+										case 'Thursday':
+											$in_time = $office_shift[0]->thursday_in_time ?? $in_time;
+											break;
+										case 'Friday':
+											$in_time = $office_shift[0]->friday_in_time ?? $in_time;
+											break;
+										case 'Saturday':
+											$in_time = $office_shift[0]->saturday_in_time ?? $in_time;
+											break;
+										case 'Sunday':
+											$in_time = $office_shift[0]->sunday_in_time ?? $in_time;
+											break;
+										default:
+											// Handle default case if needed
+											break;
+									}
+								}
+
+								// Contoh data Telat
+								$clock_in_employee = new DateTime($result_late->clock_in);  // Waktu masuk employee
+								$clock_in_real = new DateTime($clock_in_employee->format('Y-m-d') . $in_time);   // Waktu masuk real
+
+								// Menghitung selisih waktu telat hanya jika $clock_in_employee lebih lambat dari $clock_in_real
+								if ($clock_in_employee > $clock_in_real) {
+									$interval_late = $clock_in_employee->diff($clock_in_real);
+									$hours_r_late = $interval_late->format('%h');
+									$minutes_r_late = $interval_late->format('%i');
+
+									// Mengonversi selisih waktu ke format detik
+									$total_time_late = $hours_r_late . ":" . $minutes_r_late . ":00";
+									$str_time_late = preg_replace("/^([\d]{1,2})\:([\d]{2})$/", "00:$1:$2", $total_time_late);
+
+									sscanf($str_time_late, "%d:%d:%d", $hours_late, $minutes_late, $seconds_late);
+									$hrs_old_seconds_late = $hours_late * 3600 + $minutes_late * 60 + $seconds_late;
+
+									$hrs_old_int1_late = round($hrs_old_seconds_late / 60); // Perhatikan penggunaan round untuk pembulatan
+
+									// Ambil potongan dari database berdasarkan jumlah menit telat
+									$late_countWork = $this->Payroll_model->total_late_amount($user_id, $hrs_old_int1_late);
+									if ($late_countWork) {
+										$potongan = $late_countWork->late_amount;
+									} else {
+										$potongan = 0; // Atur potongan default jika tidak ada data potongan yang cocok
+									}
+
+									// Akumulasikan potongan ke totalpotongan
+									$totalpotongan += $potongan;
+								}
+							}
+						} else {
+							$totalpotongan = 0;
+						}
+
+					// 6: statutory deductions
+					// 4: other payment
+					$other_payments = $this->Employees_model->set_employee_other_payments($user_id);
+					$other_payments_amount = 0;
+					if (!is_null($other_payments)) :
+						foreach ($other_payments->result() as $sl_other_payments) {
+							$other_payments_amount += $sl_other_payments->payments_amount;
+						}
+					endif;
+					// all other payment
+					$all_other_payment = $other_payments_amount;
+					// 5: commissions
+					$commissions = $this->Employees_model->set_employee_commissions($user_id);
+					if (!is_null($commissions)) :
+						$commissions_amount = 0;
+						foreach ($commissions->result() as $sl_commissions) {
+							$commissions_amount += $sl_commissions->commission_amount;
+						}
+					endif;
+					// 6: statutory deductions
+					$statutory_deductions = $this->Employees_model->set_employee_statutory_deductions($user_id);
+					if (!is_null($statutory_deductions)) :
+						$statutory_deductions_amount = 0;
+						foreach ($statutory_deductions->result() as $sl_statutory_deductions) {
+							if ($system[0]->statutory_fixed != 'yes') :
+								$sta_salary = $basic_salary;
+								$st_amount = $sta_salary / 100 * $sl_statutory_deductions->deduction_amount;
+								$statutory_deductions_amount += $st_amount;
+							else :
+								$statutory_deductions_amount += $sl_statutory_deductions->deduction_amount;
+							endif;
+						}
+					endif;
+
+					// add amount
+					$add_salary = $allowance_amount + $basic_salary + $overtime_amount + $other_payments_amount + $commissions_amount;
+					// add amount
+					$net_salary_default = $add_salary - $loan_de_amount - $statutory_deductions_amount;
+					$net_salary = $net_salary_default;
+					$net_salary = number_format((float)$net_salary, 2, '.', '');
+					$jurl = random_string('alnum', 40);
+					$data = array(
+						'employee_id' => $user_id,
+						'department_id' => $department_id,
+						'company_id' => $user[0]->company_id,
+						'designation_id' => $designation_id,
+						'salary_month' => $this->input->post('month_year'),
+						'basic_salary' => $basic_salary,
+						'net_salary' => $net_salary,
+						'wages_type' => $empid->wages_type,
+						'total_allowances' => $allowance_amount,
+						'total_loan' => $loan_de_amount,
+						// 	'total_overtime' => $overtime_amount,
+						'total_commissions' => $commissions_amount,
+						'total_statutory_deductions' => $statutory_deductions_amount,
+						'total_other_payments' => $other_payments_amount,
+						'total_overtime' => $total_overtime,
+						'total_overtime_hours' => $total_overtime_hours,
+						'value_half_day' =>  $deduction_half_day,
+						'total_half_day' =>  $tleave_half,
+						'total_late' => $totalpotongan,
+						'is_payment' => '1',
+						'status' => '1',
+						'payslip_type' => $salary_type,
+						'hours_worked' => $hours_worked,
+						'payslip_key' => $jurl,
+						'year_to_date' => date('d-m-Y'),
+						'created_at' => date('d-m-Y h:i:s')
+					);
+					$result = $this->Payroll_model->add_salary_payslip($data);
+
+					if ($result) {
+						$ivdata = array(
+							'amount' => $net_salary,
+							'account_id' => $online_payment_account,
+							'transaction_type' => 'expense',
+							'dr_cr' => 'cr',
+							'transaction_date' => date('Y-m-d'),
+							'payer_payee_id' => $user_id,
+							'payment_method_id' => 3,
+							'description' => 'Payroll Payments',
+							'reference' => 'Payroll Payments',
+							'invoice_id' => $result,
+							'client_id' => $user_id,
+							'created_at' => date('Y-m-d H:i:s')
+						);
+						$this->Finance_model->add_transactions($ivdata);
+						// update data in bank account
+						$account_id = $this->Finance_model->read_bankcash_information($online_payment_account);
+						$acc_balance = $account_id[0]->account_balance - $net_salary;
+
+						$data3 = array(
+							'account_balance' => $acc_balance
+						);
+						$this->Finance_model->update_bankcash_record($data3, $online_payment_account);
+
+						$salary_allowances = $this->Employees_model->read_salary_allowances($user_id);
+						$count_allowances = $this->Employees_model->count_employee_allowances($user_id);
+						$allowance_amount = 0;
+						if ($count_allowances > 0) {
+							foreach ($salary_allowances as $sl_allowances) {
+								$allowance_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'salary_month' => $this->input->post('month_year'),
+									'allowance_title' => $sl_allowances->allowance_title,
+									'allowance_amount' => $sl_allowances->allowance_amount,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$_allowance_data = $this->Payroll_model->add_salary_payslip_allowances($allowance_data);
+							}
+						}
+						// set commissions
+						$salary_commissions = $this->Employees_model->read_salary_commissions($user_id);
+						$count_commission = $this->Employees_model->count_employee_commissions($user_id);
+						$commission_amount = 0;
+						if ($count_commission > 0) {
+							foreach ($salary_commissions as $sl_commission) {
+								$commissions_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'salary_month' => $this->input->post('month_year'),
+									'commission_title' => $sl_commission->commission_title,
+									'commission_amount' => $sl_commission->commission_amount,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$this->Payroll_model->add_salary_payslip_commissions($commissions_data);
+							}
+						}
+						// set other payments
+						$salary_other_payments = $this->Employees_model->read_salary_other_payments($user_id);
+						$count_other_payment = $this->Employees_model->count_employee_other_payments($user_id);
+						$other_payment_amount = 0;
+						if ($count_other_payment > 0) {
+							foreach ($salary_other_payments as $sl_other_payments) {
+								$other_payments_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'salary_month' => $this->input->post('month_year'),
+									'payments_title' => $sl_other_payments->payments_title,
+									'payments_amount' => $sl_other_payments->payments_amount,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$this->Payroll_model->add_salary_payslip_other_payments($other_payments_data);
+							}
+						}
+						// set statutory_deductions
+						$salary_statutory_deductions = $this->Employees_model->read_salary_statutory_deductions($user_id);
+						$count_statutory_deductions = $this->Employees_model->count_employee_statutory_deductions($user_id);
+						$statutory_deductions_amount = 0;
+						if ($count_statutory_deductions > 0) {
+							foreach ($salary_statutory_deductions as $sl_statutory_deduction) {
+								$statutory_deduction_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'salary_month' => $this->input->post('month_year'),
+									'deduction_title' => $sl_statutory_deduction->deduction_title,
+									'deduction_amount' => $sl_statutory_deduction->deduction_amount,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$this->Payroll_model->add_salary_payslip_statutory_deductions($statutory_deduction_data);
+							}
+						}
+						$salary_loan_deduction = $this->Employees_model->read_salary_loan_deductions($user_id);
+						$count_loan_deduction = $this->Employees_model->count_employee_deductions($user_id);
+						$loan_de_amount = 0;
+						if ($count_loan_deduction > 0) {
+							foreach ($salary_loan_deduction as $sl_salary_loan_deduction) {
+								$loan_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'salary_month' => $this->input->post('month_year'),
+									'loan_title' => $sl_salary_loan_deduction->loan_deduction_title,
+									'loan_amount' => $sl_salary_loan_deduction->loan_deduction_amount,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$_loan_data = $this->Payroll_model->add_salary_payslip_loan($loan_data);
+							}
+						}
+						$salary_overtime = $this->Employees_model->read_salary_overtime($user_id);
+						$count_overtime = $this->Employees_model->count_employee_overtime($user_id);
+						$overtime_amount = 0;
+						if ($count_overtime > 0) {
+							foreach ($salary_overtime as $sl_overtime) {
+								//$overtime_total = $sl_overtime->overtime_hours * $sl_overtime->overtime_rate;
+								$overtime_data = array(
+									'payslip_id' => $result,
+									'employee_id' => $user_id,
+									'overtime_salary_month' => $this->input->post('month_year'),
+									'overtime_title' => $sl_overtime->overtime_type,
+									'overtime_no_of_days' => $sl_overtime->no_of_days,
+									'overtime_hours' => $sl_overtime->overtime_hours,
+									'overtime_rate' => $sl_overtime->overtime_rate,
+									'created_at' => date('d-m-Y h:i:s')
+								);
+								$_overtime_data = $this->Payroll_model->add_salary_payslip_overtime($overtime_data);
+							}
+						}
+
+						$Return['result'] = $this->lang->line('xin_success_payment_paid');
+					} else {
+						$Return['error'] = $this->lang->line('xin_error_msg');
+					}
+				} // if basic salary
+
+			}
+			$Return['result'] = $this->lang->line('xin_success_payment_paid');
+			$this->output($Return);
+			exit;
+		}
+	}
